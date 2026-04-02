@@ -282,6 +282,17 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "sendblue-mcp" });
 });
 
+// Ensure Accept header includes text/event-stream (required by StreamableHTTP transport)
+app.use("/mcp", (req, _res, next) => {
+  const accept = req.headers["accept"] || "";
+  if (!accept.includes("text/event-stream")) {
+    req.headers["accept"] = accept
+      ? `${accept}, text/event-stream`
+      : "text/event-stream";
+  }
+  next();
+});
+
 // GET /mcp — client opens SSE stream to receive server messages
 app.get("/mcp", async (req, res) => {
   const transport = new StreamableHTTPServerTransport({

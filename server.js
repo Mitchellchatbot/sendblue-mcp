@@ -1,4 +1,6 @@
 import express from "express";
+import cors from "cors";
+import { randomUUID } from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -269,27 +271,64 @@ function createMcpServer() {
 // --- Express App ---
 
 const app = express();
+app.use(cors());
 app.use(express.json());
+
+// Session store: sessionId -> transport
+const sessions = new Map();
 
 // Health check
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "sendblue-mcp" });
 });
 
-// MCP endpoint — stateless, one transport per request
-app.all("/mcp", async (req, res) => {
-  const server = createMcpServer();
+// GET /mcp — client opens SSE stream to receive server messages
+app.get("/mcp", async (req, res) => {
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined, // stateless
+    sessionIdGenerator: randomUUID,
   });
+  const server = createMcpServer();
 
-  res.on("close", () => {
-    transport.close();
+  transport.onclose = () => {
+    if (transport.sessionId) sessions.delete(transport.sessionId);
     server.close();
-  });
+  };
 
   await server.connect(transport);
+  if (transport.sessionId) sessions.set(transport.sessionId, transport);
+
+  await transport.handleRequest(req, res);
+});
+
+// POST /mcp — client sends JSON-RPC messages
+app.post("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+
+  if (sessionId && sessions.has(sessionId)) {
+    await sessions.get(sessionId).handleRequest(req, res, req.body);
+    return;
+  }
+
+  // No existing session — stateless single-request mode
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+  const server = createMcpServer();
+  res.on("close", () => { transport.close(); server.close(); });
+  await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
+});
+
+// DELETE /mcp — client closes session
+app.delete("/mcp", async (req, res) => {
+  const sessionId = req.headers["mcp-session-id"];
+  if (sessionId && sessions.has(sessionId)) {
+    const transport = sessions.get(sessionId);
+    await transport.handleRequest(req, res);
+    sessions.delete(sessionId);
+  } else {
+    res.status(404).json({ error: "Session not found" });
+  }
 });
 
 app.listen(PORT, () => {
